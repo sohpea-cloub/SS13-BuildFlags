@@ -62,7 +62,20 @@ let statusBar: vscode.StatusBarItem;
 
 const TASK_TYPE = 'ss13buildflags';
 
-export function activate(context: vscode.ExtensionContext) {
+/** Fires when flags or values are changed in the UI. */
+const flagsChanged = new vscode.EventEmitter<void>();
+
+/** The exports other extensions get from this extension. */
+export interface BuildFlagsApi {
+	/** Returns the active defines as an array of `NAME` or `NAME=VALUE` strings. */
+	current(): string[];
+	/** Event that is fired when the selected flags or values change. */
+	onDidChangeFlags: vscode.Event<void>;
+	/** Returns true if the task will have flags injected into it by this extension. */
+	buildsWithFlags(preLaunchTask: unknown): boolean;
+}
+
+export function activate(context: vscode.ExtensionContext): BuildFlagsApi {
 	statusBar = vscode.window.createStatusBarItem(
 		vscode.StatusBarAlignment.Left,
 		50,
@@ -95,6 +108,7 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			setEnabled(context, allDisabled);
 			provider.refresh();
+			flagsChanged.fire();
 		}),
 		vscode.tasks.registerTaskProvider(TASK_TYPE, {
 			provideTasks: () => {
@@ -103,18 +117,34 @@ export function activate(context: vscode.ExtensionContext) {
 			},
 			resolveTask: () => undefined,
 		}),
-		vscode.debug.registerDebugConfigurationProvider('byond', {
-			resolveDebugConfiguration(_folder, config) {
-				const baseTaskName = getBaseTaskName();
-				if (baseTaskName && config.preLaunchTask === baseTaskName) {
-					config.preLaunchTask = flagInjectorTaskLabel(baseTaskName);
-				}
-				return config;
-			},
-		}),
+		...['byond', 'auxtools'].map((type) =>
+			vscode.debug.registerDebugConfigurationProvider(type, {
+				resolveDebugConfiguration(_folder, config) {
+					const baseTaskName = getBaseTaskName();
+					if (baseTaskName && config.preLaunchTask === baseTaskName) {
+						config.preLaunchTask = flagInjectorTaskLabel(baseTaskName);
+					}
+					return config;
+				},
+			}),
+		),
+		flagsChanged,
 	);
 
 	updateStatusBar(context);
+
+	return {
+		current: () => activeDefineTokens(context),
+		onDidChangeFlags: flagsChanged.event,
+		buildsWithFlags: (preLaunchTask) => {
+			const baseTaskName = getBaseTaskName();
+			return (
+				!!baseTaskName &&
+				(preLaunchTask === baseTaskName ||
+					preLaunchTask === flagInjectorTaskLabel(baseTaskName))
+			);
+		},
+	};
 }
 
 export function deactivate() { }
@@ -834,6 +864,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 					writeLocalDefines(this.context, ids, values, enabled);
 				}
 				updateStatusBar(this.context, ids, values, enabled);
+				flagsChanged.fire();
 			} else if (msg?.type === 'openFile') {
 				openWorkspaceFile(msg.path, msg.line);
 			}
